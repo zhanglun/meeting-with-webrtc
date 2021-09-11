@@ -8,9 +8,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-app.get('/:name', (req, res) => {
-  return res.sendFile(path.resolve(__dirname, '../client', req.params.name));
-})
+app.use(express.static('../client'));
 
 io.on('connection', (socket) => {
   console.log('a user connected');
