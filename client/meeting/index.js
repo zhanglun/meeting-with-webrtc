@@ -1,15 +1,12 @@
 import { connectSocket } from './libs/socket.js';
+import { reportError, log_error, log, createRoomHash } from './libs/helper.js';
+
 let localPeerConnection = null
-let remotePeerConnection = null;
 let socket = null;
+const remoteStream = [];
 // let userName = prompt('输入你的名字');
 
-// 产生随机数
-if (!location.hash) {
-  location.hash = Math.floor(Math.random() * 0xFFFFFF).toString(16);
-}
-// 获取房间号
-const roomHash = location.hash.substring(1);
+const roomHash = createRoomHash();
 const mediaConstraints = {
   video: {
     width: 1280,
@@ -23,29 +20,30 @@ function app() {
   init();
 }
 
-function reportError(errMessage) {
-  log_error(`Error ${errMessage.name}: ${errMessage.message}`);
-}
-
 function init() {
   localPeerConnection = createPeerConnection();
 
   const $video = document.querySelector("#local_video");
 
-  navigator.mediaDevices.getUserMedia(mediaConstraints).then((stream) => {
-    $video.srcObject = stream;
-    stream
-      .getTracks()
-      .forEach((track) => {
+  navigator.mediaDevices.getUserMedia(mediaConstraints)
+    .then((stream) => {
+      $video.srcObject = stream;
+
+      stream.getTracks().forEach((track) => {
         localPeerConnection.addTrack(track, stream)
       });
-  });
+    });
 }
 
 function initSocket() {
   socket = connectSocket();
 
-  socket.emit('join', 'zhanglun-test');
+  socket.emit('join', roomHash);
+
+  socket.on('close', () => {
+    log('close');
+    removeRemoteVideo();
+  });
 
   socket.on('message', (data) => {
     const msg = JSON.parse(data);
@@ -78,29 +76,29 @@ function handleVideoOfferMsg(msg) {
   localPeerConnection.setRemoteDescription(desc).then(function () {
     return navigator.mediaDevices.getUserMedia(mediaConstraints);
   })
-  .then(function(stream) {
-    localStream = stream;
-    document.querySelector("#local_video").srcObject = localStream;
+    .then(function (stream) {
+      localStream = stream;
+      document.querySelector("#local_video").srcObject = localStream;
 
-    localStream.getTracks().forEach(track => localPeerConnection.addTrack(track, localStream));
-  })
-  .then(function() {
-    return localPeerConnection.createAnswer();
-  })
-  .then(function(answer) {
-    return localPeerConnection.setLocalDescription(answer);
-  })
-  .then(function() {
-    var msg = {
-      type: "video-answer",
-      sdp: localPeerConnection.localDescription
-    };
+      localStream.getTracks().forEach(track => localPeerConnection.addTrack(track, localStream));
+    })
+    .then(function () {
+      return localPeerConnection.createAnswer();
+    })
+    .then(function (answer) {
+      return localPeerConnection.setLocalDescription(answer);
+    })
+    .then(function () {
+      var msg = {
+        type: "video-answer",
+        sdp: localPeerConnection.localDescription
+      };
 
-    sendToServer(msg);
-  })
-  .catch((err) => {
-    log_error(err);
-  });
+      sendToServer(msg);
+    })
+    .catch((err) => {
+      log_error(err);
+    });
 }
 
 function handleVideoAnswerMsg(msg) {
@@ -121,22 +119,13 @@ function handleNewICECandidateMsg(msg) {
 }
 
 function sendToServer(msg) {
-  var msgJSON = JSON.stringify(msg);
+  msg.roomHash = roomHash;
+
+  const msgJSON = JSON.stringify(msg);
 
   log("Sending '" + msg.type + "' message: " + msgJSON);
+
   socket.send(msgJSON);
-}
-
-function log_error(text) {
-  var time = new Date();
-
-  console.trace("[" + time.toLocaleTimeString() + "] " + text);
-}
-
-function log(text) {
-  var time = new Date();
-
-  console.log("[" + time.toLocaleTimeString() + "] " + text);
 }
 
 function createPeerConnection() {
@@ -153,8 +142,10 @@ function createPeerConnection() {
 
 function handleTrackEvent(event) {
   log("*** Track event");
-  document.getElementById("received_video").srcObject = event.streams[0];
-  // document.getElementById("hangup-button").disabled = false;
+  const stream = event.streams[0];
+  
+  document.getElementById("received_video").srcObject = stream;
+  remoteStream.push(stream);
 }
 
 function handleNegotiationNeededEvent() {
@@ -186,7 +177,7 @@ function handleICECandidateEvent(event) {
 function handleICEConnectionStateChangeEvent(event) {
   log(
     "*** ICE connection state changed to " +
-      localPeerConnection.iceConnectionState
+    localPeerConnection.iceConnectionState
   );
 
   switch (localPeerConnection.iceConnectionState) {
@@ -201,7 +192,7 @@ function handleICEConnectionStateChangeEvent(event) {
 function handleSignalingStateChangeEvent(event) {
   log(
     "*** WebRTC signaling state changed to: " +
-      localPeerConnection.signalingState
+    localPeerConnection.signalingState
   );
   switch (localPeerConnection.signalingState) {
     case "closed":
@@ -213,7 +204,7 @@ function handleSignalingStateChangeEvent(event) {
 function handleICEGatheringStateChangeEvent(event) {
   log(
     "*** ICE gathering state changed to: " +
-      localPeerConnection.iceGatheringState
+    localPeerConnection.iceGatheringState
   );
 }
 
@@ -247,9 +238,36 @@ function closeVideoCall() {
   remoteVideo.removeAttribute("srcObject");
   localVideo.removeAttribute("src");
   remoteVideo.removeAttribute("srcObject");
+}
 
-  document.getElementById("hangup-button").disabled = true;
-  targetUsername = null;
+function leave() {
+  socket.emit('leave');
+}
+
+function removeRemoteVideo() {
+  const remoteVideo = document.getElementById("received_video");
+
+  if (localPeerConnection) {
+    // localPeerConnection.ontrack = null;
+    // localPeerConnection.onremovetrack = null;
+    // localPeerConnection.onremovestream = null;
+    // localPeerConnection.onicecandidate = null;
+    // localPeerConnection.oniceconnectionstatechange = null;
+    // localPeerConnection.onsignalingstatechange = null;
+    // localPeerConnection.onicegatheringstatechange = null;
+    // localPeerConnection.onnegotiationneeded = null;
+    
+    if (remoteVideo.srcObject) {
+      remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+      localPeerConnection.removeTrack(remoteStream.pop());
+      
+      log('remoteStream.', remoteStream);
+    }
+  }
+
+  remoteVideo.removeAttribute("src");
+  remoteVideo.removeAttribute("srcObject");
 }
 
 window.onload = app;
+window.onunload = leave;

@@ -8,6 +8,11 @@ exports.handleMessage = (io) => {
       socket.join(ROOMID);
     });
 
+    socket.on('leave', () => {
+      socket.to(ROOMID).emit('leaved');
+      socket.leave(ROOMID);
+    });
+
     socket.on('message', (message) => {
       const msg = JSON.parse(message);
       socket.to(ROOMID).emit('message', message);
