@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="index.css">
+  <script src="../socket.io.min.js"></script>
+  <script type="module" src="./index.js"></script>
+  <title>Meeting</title>
+</head>
+<body>
+  <div id="app">
+    <div id="video-container">
+      <video id="local_video" class="video" autoplay></video>
+      <video id="received_video" class="video" autoplay></video>
+    </div>
+    <div id="control-bar"></div>
+  </div> 
+</body>
+</html>
