@@ -1,0 +1,10 @@
+body {
+  background: #000;
+}
+
+#video {
+  width: 1280px;
+  height: 720px;
+  display: block;
+  margin: 100px auto;
+}
