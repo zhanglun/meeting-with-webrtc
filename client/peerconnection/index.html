@@ -10,12 +10,17 @@
   <title>Meeting</title>
 </head>
 <body>
-  <div id="app">
-    <div id="video-container">
-      <video id="local_video" class="video" autoplay></video>
-      <video id="received_video" class="video" autoplay></video>
-    </div>
-    <div id="control-bar"></div>
-  </div> 
+	<div class="login-users-container">
+		<ul id="login-users"></ul>
+	</div>
+
+	<div class="video-container">
+		<div class="local-video-wrapper">
+			<video id="local-video" autoplay></video>
+		</div>
+		<div class="remote-video-wrapper">
+			<video id="remote-video" autoplay></video>
+		</div>
+	</div>
 </body>
 </html>

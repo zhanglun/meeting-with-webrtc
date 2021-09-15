@@ -1,255 +1,282 @@
 import { connectSocket } from './libs/socket.js';
-let localPeerConnection = null
-let remotePeerConnection = null;
-let socket = null;
-// let userName = prompt('输入你的名字');
+import { reportError, log_error, log, createRoomHash, randomName } from './libs/helper.js';
 
-// 产生随机数
-if (!location.hash) {
-  location.hash = Math.floor(Math.random() * 0xFFFFFF).toString(16);
-}
-// 获取房间号
-const roomHash = location.hash.substring(1);
-const mediaConstraints = {
-  video: {
-    width: 1280,
-    height: 720,
-  },
-  // audio: true,
-};
+const CLIENT_RTC_EVENT = 'CLIENT_RTC_EVENT';
+const SERVER_RTC_EVENT = 'SERVER_RTC_EVENT';
 
-function app() {
-  initSocket();
-  init();
-}
+const CLIENT_USER_EVENT = 'CLIENT_USER_EVENT';
+const SERVER_USER_EVENT = 'SERVER_USER_EVENT';
 
-function reportError(errMessage) {
-  log_error(`Error ${errMessage.name}: ${errMessage.message}`);
-}
+const CLIENT_USER_EVENT_LOGIN = 'CLIENT_USER_EVENT_LOGIN'; // 登录
 
-function init() {
-  localPeerConnection = createPeerConnection();
+const SERVER_USER_EVENT_UPDATE_USERS = 'SERVER_USER_EVENT_UPDATE_USERS';
 
-  const $video = document.querySelector("#local_video");
+const SIGNALING_OFFER = 'SIGNALING_OFFER';
+const SIGNALING_ANSWER = 'SIGNALING_ANSWER';
+const SIGNALING_CANDIDATE = 'SIGNALING_CANDIDATE';
 
-  navigator.mediaDevices.getUserMedia(mediaConstraints).then((stream) => {
-    $video.srcObject = stream;
-    stream
-      .getTracks()
-      .forEach((track) => {
-        localPeerConnection.addTrack(track, stream)
-      });
+let remoteUser = ''; // 远端用户
+let localUser = ''; // 本地登录用户
+
+const socket = connectSocket();
+
+socket.on('connect', function () {
+  log('ws connect.');
+});
+
+socket.on('connect_error', function () {
+  log('ws connect_error.');
+});
+
+socket.on('error', function (errorMessage) {
+  log('ws error, ' + errorMessage);
+});
+
+socket.on(SERVER_USER_EVENT, function (msg) {
+  const type = msg.type;
+  const payload = msg.payload;
+
+  switch (type) {
+    case SERVER_USER_EVENT_UPDATE_USERS:
+      updateUserList(payload);
+      break;
+  }
+  log(`[${SERVER_USER_EVENT}] [${type}], ${JSON.stringify(msg)}`);
+});
+
+socket.on(SERVER_RTC_EVENT, function (msg) {
+  const { type } = msg;
+
+  switch (type) {
+    case SIGNALING_OFFER:
+      handleReceiveOffer(msg);
+      break;
+    case SIGNALING_ANSWER:
+      handleReceiveAnswer(msg);
+      break;
+    case SIGNALING_CANDIDATE:
+      handleReceiveCandidate(msg);
+      break;
+  }
+});
+
+async function handleReceiveOffer(msg) {
+  log(`receive remote description from ${msg.payload.from}`);
+
+  // 设置远端描述
+  const remoteDescription = new RTCSessionDescription(msg.payload.sdp);
+  remoteUser = msg.payload.from;
+  createPeerConnection();
+  await pc.setRemoteDescription(remoteDescription); // TODO 错误处理
+
+  // 本地音视频采集
+  const localVideo = document.getElementById('local-video');
+  const mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  localVideo.srcObject = mediaStream;
+  mediaStream.getTracks().forEach(track => {
+    pc.addTrack(track, mediaStream);
+    // pc.addTransceiver(track, {streams: [mediaStream]}); // 这个也可以
   });
-}
+  // pc.addStream(mediaStream); // 目前这个也可以，不过接口后续会废弃
 
-function initSocket() {
-  socket = connectSocket();
-
-  socket.emit('join', 'zhanglun-test');
-
-  socket.on('message', (data) => {
-    const msg = JSON.parse(data);
-    log("Message received: ");
-    console.dir(msg);
-    const time = new Date(msg.date);
-    const timeStr = time.toLocaleTimeString();
-
-    switch (msg.type) {
-      case "video-offer":
-        handleVideoOfferMsg(msg);
-        break;
-      case "video-answer":  // Callee has answered our offer
-        handleVideoAnswerMsg(msg);
-        break;
-      case "new-ice-candidate": // A new ICE candidate has been received
-        handleNewICECandidateMsg(msg);
-        break;
-      default:
-        break;
+  const answer = await pc.createAnswer(); // TODO 错误处理
+  await pc.setLocalDescription(answer);
+  sendRTCEvent({
+    type: SIGNALING_ANSWER,
+    payload: {
+      sdp: answer,
+      from: localUser,
+      target: remoteUser
     }
   });
 }
 
-function handleVideoOfferMsg(msg) {
-  var localStream = null;
+async function handleReceiveAnswer(msg) {
+  log(`receive remote answer from ${msg.payload.from}`);
 
-  var desc = new RTCSessionDescription(msg.sdp);
+  const remoteDescription = new RTCSessionDescription(msg.payload.sdp);
+  remoteUser = msg.payload.from;
 
-  localPeerConnection.setRemoteDescription(desc).then(function () {
-    return navigator.mediaDevices.getUserMedia(mediaConstraints);
-  })
-  .then(function(stream) {
-    localStream = stream;
-    document.querySelector("#local_video").srcObject = localStream;
+  await pc.setRemoteDescription(remoteDescription); // TODO 错误处理
+}
 
-    localStream.getTracks().forEach(track => localPeerConnection.addTrack(track, localStream));
-  })
-  .then(function() {
-    return localPeerConnection.createAnswer();
-  })
-  .then(function(answer) {
-    return localPeerConnection.setLocalDescription(answer);
-  })
-  .then(function() {
-    var msg = {
-      type: "video-answer",
-      sdp: localPeerConnection.localDescription
-    };
+async function handleReceiveCandidate(msg) {
+  log(`receive candidate from ${msg.payload.from}`);
+  await pc.addIceCandidate(msg.payload.candidate); // TODO 错误处理
+}
 
-    sendToServer(msg);
-  })
-  .catch((err) => {
-    log_error(err);
+/**
+ * 发送用户相关消息给服务器
+ * @param {Object} msg 格式如 { type: 'xx', payload: {} }
+ */
+function sendUserEvent(msg) {
+  socket.emit(CLIENT_USER_EVENT, JSON.stringify(msg));
+}
+
+/**
+ * 发送RTC相关消息给服务器
+ * @param {Object} msg 格式如{ type: 'xx', payload: {} }
+ */
+function sendRTCEvent(msg) {
+  socket.emit(CLIENT_RTC_EVENT, JSON.stringify(msg));
+}
+
+let pc = null;
+
+/**
+ * 邀请用户加入视频聊天
+ *  1、本地启动视频采集
+ *  2、交换信令
+ */
+async function startVideoTalk() {
+  // 开启本地视频
+  const localVideo = document.getElementById('local-video');
+  const mediaStream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: true
+  });
+  localVideo.srcObject = mediaStream;
+
+  // 创建 peerConnection
+  createPeerConnection();
+
+  // 将媒体流添加到webrtc的音视频收发器
+  mediaStream.getTracks().forEach(track => {
+    pc.addTrack(track, mediaStream);
+    // pc.addTransceiver(track, {streams: [mediaStream]});
   });
 }
 
-function handleVideoAnswerMsg(msg) {
-  log("*** Call recipient has accepted our call");
-
-  // Configure the remote description, which is the SDP payload
-  // in our "video-answer" message.
-
-  var desc = new RTCSessionDescription(msg.sdp);
-  return localPeerConnection.setRemoteDescription(desc).catch(reportError);
-}
-
-function handleNewICECandidateMsg(msg) {
-  const candidate = new RTCIceCandidate(msg.candidate);
-
-  localPeerConnection.addIceCandidate(candidate)
-    .catch(reportError);
-}
-
-function sendToServer(msg) {
-  var msgJSON = JSON.stringify(msg);
-
-  log("Sending '" + msg.type + "' message: " + msgJSON);
-  socket.send(msgJSON);
-}
-
-function log_error(text) {
-  var time = new Date();
-
-  console.trace("[" + time.toLocaleTimeString() + "] " + text);
-}
-
-function log(text) {
-  var time = new Date();
-
-  console.log("[" + time.toLocaleTimeString() + "] " + text);
-}
-
 function createPeerConnection() {
-  const peer = new RTCPeerConnection();
-  peer.onicecandidate = handleICECandidateEvent;
-  peer.oniceconnectionstatechange = handleICEConnectionStateChangeEvent;
-  peer.onicegatheringstatechange = handleICEGatheringStateChangeEvent;
-  peer.onsignalingstatechange = handleSignalingStateChangeEvent;
-  peer.onnegotiationneeded = handleNegotiationNeededEvent;
-  peer.ontrack = handleTrackEvent;
+  // const iceConfig = {
+  //   "iceServers": [
+  //     { url: 'stun:stun.ekiga.net' },
+  //     { url: 'turn:turnserver.com', username: 'user', credential: 'pass' }
+  //   ]
+  // };
 
-  return peer;
+  pc = new RTCPeerConnection();
+
+  pc.onnegotiationneeded = onnegotiationneeded;
+  pc.onicecandidate = onicecandidate;
+  pc.onicegatheringstatechange = onicegatheringstatechange;
+  pc.oniceconnectionstatechange = oniceconnectionstatechange;
+  pc.onsignalingstatechange = onsignalingstatechange;
+  pc.ontrack = ontrack;
+
+  return pc;
 }
 
-function handleTrackEvent(event) {
-  log("*** Track event");
-  document.getElementById("received_video").srcObject = event.streams[0];
-  // document.getElementById("hangup-button").disabled = false;
+async function onnegotiationneeded() {
+  log(`onnegotiationneeded.`);
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer); 
+
+  sendRTCEvent({
+    type: SIGNALING_OFFER,
+    payload: {
+      from: localUser,
+      target: remoteUser,
+      sdp: pc.localDescription // TODO 直接用offer？
+    }
+  });
 }
 
-function handleNegotiationNeededEvent() {
-  localPeerConnection
-    .createOffer()
-    .then(function (offer) {
-      return localPeerConnection.setLocalDescription(offer);
-    })
-    .then(function () {
-      sendToServer({
-        type: "video-offer",
-        sdp: localPeerConnection.localDescription,
-      });
-    })
-    .catch(reportError);
-}
+function onicecandidate(evt) {
+  if (evt.candidate) {
+    log(`onicecandidate.`);
 
-function handleICECandidateEvent(event) {
-  if (event.candidate) {
-    log("*** Outgoing ICE candidate: " + event.candidate.candidate);
-
-    sendToServer({
-      type: "new-ice-candidate",
-      candidate: event.candidate,
+    sendRTCEvent({
+      type: SIGNALING_CANDIDATE,
+      payload: {
+        from: localUser,
+        target: remoteUser,
+        candidate: evt.candidate
+      }
     });
   }
 }
 
-function handleICEConnectionStateChangeEvent(event) {
-  log(
-    "*** ICE connection state changed to " +
-      localPeerConnection.iceConnectionState
-  );
+function onicegatheringstatechange(evt) {
+  log(`onicegatheringstatechange, pc.iceGatheringState is ${pc.iceGatheringState}.`);
+}
 
-  switch (localPeerConnection.iceConnectionState) {
-    case "closed":
-    case "failed":
-    case "disconnected":
-      closeVideoCall();
-      break;
+function oniceconnectionstatechange(evt) {
+  log(`oniceconnectionstatechange, pc.iceConnectionState is ${pc.iceConnectionState}.`);
+}
+
+function onsignalingstatechange(evt) {
+  log(`onsignalingstatechange, pc.signalingstate is ${pc.signalingstate}.`);
+}
+
+// 调用 pc.addTrack(track, mediaStream)，remote peer的 onTrack 会触发两次
+// 实际上两次触发时，evt.streams[0] 指向同一个mediaStream引用
+// 这个行为有点奇怪，github issue 也有提到 https://github.com/meetecho/janus-gateway/issues/1313
+let stream;
+function ontrack(evt) {
+  // if (!stream) {
+  //     stream = evt.streams[0];
+  // } else {
+  //     console.log(`${stream === evt.streams[0]}`); // 这里为true
+  // }
+  log(`ontrack.`);
+  const remoteVideo = document.getElementById('remote-video');
+  remoteVideo.srcObject = evt.streams[0];
+}
+
+// 点击用户列表
+async function handleUserClick(evt) {
+  const target = evt.target;
+  const userName = target.getAttribute('data-name').trim();
+
+  if (userName === localUser) {
+    alert('不能跟自己进行视频会话');
+    return;
   }
+
+  log(`online user selected: ${userName}`);
+
+  remoteUser = userName;
+  await startVideoTalk(remoteUser);
 }
 
-function handleSignalingStateChangeEvent(event) {
-  log(
-    "*** WebRTC signaling state changed to: " +
-      localPeerConnection.signalingState
-  );
-  switch (localPeerConnection.signalingState) {
-    case "closed":
-      closeVideoCall();
-      break;
-  }
+/**
+ * 更新用户列表
+ * @param {Array} users 用户列表，比如 [{name: '小明', name: '小强'}]
+ */
+function updateUserList(users) {
+  const fragment = document.createDocumentFragment();
+  const userList = document.getElementById('login-users');
+  userList.innerHTML = '';
+
+  users.forEach(user => {
+    const li = document.createElement('li');
+    li.innerHTML = user.userName;
+    li.setAttribute('data-name', user.userName);
+    li.addEventListener('click', handleUserClick);
+    fragment.appendChild(li);
+  });
+
+  userList.appendChild(fragment);
 }
 
-function handleICEGatheringStateChangeEvent(event) {
-  log(
-    "*** ICE gathering state changed to: " +
-      localPeerConnection.iceGatheringState
-  );
-}
-
-function closeVideoCall() {
-  var remoteVideo = document.getElementById("received_video");
-  var localVideo = document.getElementById("local_video");
-
-  if (localPeerConnection) {
-    localPeerConnection.ontrack = null;
-    localPeerConnection.onremovetrack = null;
-    localPeerConnection.onremovestream = null;
-    localPeerConnection.onicecandidate = null;
-    localPeerConnection.oniceconnectionstatechange = null;
-    localPeerConnection.onsignalingstatechange = null;
-    localPeerConnection.onicegatheringstatechange = null;
-    localPeerConnection.onnegotiationneeded = null;
-
-    if (remoteVideo.srcObject) {
-      remoteVideo.srcObject.getTracks().forEach(track => track.stop());
+/**
+ * 用户登录
+ * @param {String} loginName 用户名
+ */
+function login(loginName) {
+  localUser = loginName;
+  sendUserEvent({
+    type: CLIENT_USER_EVENT_LOGIN,
+    payload: {
+      loginName: loginName
     }
-
-    if (localVideo.srcObject) {
-      localVideo.srcObject.getTracks().forEach(track => track.stop());
-    }
-
-    localPeerConnection.close();
-    localPeerConnection = null;
-  }
-
-  remoteVideo.removeAttribute("src");
-  remoteVideo.removeAttribute("srcObject");
-  localVideo.removeAttribute("src");
-  remoteVideo.removeAttribute("srcObject");
-
-  document.getElementById("hangup-button").disabled = true;
-  targetUsername = null;
+  });
 }
 
-window.onload = app;
+function init() {
+  login(randomName());
+}
+
+init();
